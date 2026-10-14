@@ -84,6 +84,7 @@ Antigravity_Telemetry/
 ├── install_client.ps1                  # Instalador automático del hook global en Windows para desarrolladores
 ├── query_reports.py                    # Script de consulta rápida de reportes en consola
 ├── requirements.txt                    # Dependencias de Python (google-cloud-bigquery, tiktoken)
+├── GUIA_INSTALACION_CLIENTE.md         # Guía paso a paso de copia manual de archivos y gcloud por desarrollador
 └── README.md                           # Documentación técnica y de arquitectura
 ```
 
