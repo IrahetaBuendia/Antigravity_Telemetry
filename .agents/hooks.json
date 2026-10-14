@@ -1,0 +1,12 @@
+{
+  "antigravity-token-telemetry": {
+    "enabled": true,
+    "PostInvocation": [
+      {
+        "type": "command",
+        "command": "python .agents/scripts/telemetry_hook.py",
+        "timeout": 30
+      }
+    ]
+  }
+}
