@@ -4,50 +4,73 @@ Esta guía proporciona la arquitectura y el procedimiento paso a paso para despl
 
 ---
 
-## 1. Arquitectura de la Solución
+## 1. Arquitectura Final de la Solución (Cross-Project)
 
-El sistema opera bajo un modelo híbrido en dos capas debido a las directivas de seguridad y privacidad de Google Cloud:
+El sistema opera bajo un modelo híbrido **Cross-Project** en dos capas independientes (Telemetría Directa de Cliente + Auditoría Cloud Logging), separando el proyecto de licenciamiento/inferencia de IA (`pro-gemini-enterprise-uip-mh`) del proyecto central de almacenamiento analítico en BigQuery (`desa01-uip`):
 
 ```mermaid
-flowchart TD
-    subgraph DevEnvironment["Entorno Local del Desarrollador"]
-        CLI["Antigravity CLI / IDE"]
-        Hook["Lifecycle Hook (PostInvocation)<br/>.agents/hooks.json"]
-        PyHook["telemetry_hook.py<br/>(Calcula Input/Output Tokens)"]
-        Transcript["Historial de Sesión<br/>transcript.jsonl"]
+flowchart TB
+    subgraph DevMachine["💻 Entorno Local del Desarrollador (Windows / CLI / IDE)"]
+        direction TB
+        Installer["Instalador Automático<br/>install_client.ps1"]
+        IDE["Antigravity IDE / CLI<br/>(Cambio dinámico de Modelos)"]
+        Transcript["Historial Local de Sesión<br/>~/.gemini/antigravity/brain/.../transcript.jsonl"]
+        GlobalHook["Configuración Global Hook (PostInvocation)<br/>~/.gemini/config/hooks.json"]
+        PyHook["Script de Telemetría en Vivo<br/>~/.gemini/scripts/telemetry_hook.py<br/>(tiktoken + Regex Decimal + ADC)"]
+        StateFile["Control Anti-Duplicados<br/>~/.gemini/antigravity/.telemetry_state.json"]
+        Backfill["Ingesta Histórica (Backfill)<br/>.agents/scripts/backfill_token_usage.py"]
+
+        Installer -.->|"Configura 1 sola vez"| GlobalHook
+        Installer -.->|"Instala script"| PyHook
+        IDE -->|"1. Escribe pasos y cambio de modelo"| Transcript
+        IDE -->|"2. Dispara al finalizar cada respuesta"| GlobalHook
+        GlobalHook -->|"3. Ejecuta en segundo plano"| PyHook
+        Transcript -.->|"4. Lee tokens y modelo activo"| PyHook
+        PyHook <-->|"Verifica último step_index"| StateFile
+        Transcript -.->|"Lectura masiva inicial"| Backfill
     end
 
-    subgraph GCP_AI["Proyecto Google Cloud (AI / Runtime)"]
-        API["businessaicode.googleapis.com"]
-        CloudAudit["Cloud Audit Logs<br/>(Data Access)"]
-        Sink["Log Sink:<br/>antigravity-usage-sink"]
+    subgraph GCP_AI["☁️ Proyecto GCP Motor IA: pro-gemini-enterprise-uip-mh"]
+        direction TB
+        API["APIs de Inferencia:<br/>cloudaicompanion.googleapis.com<br/>businessaicode.googleapis.com<br/>(Licencia Enterprise + Pago por Uso $20)"]
+        NativeMetrics["Panel Nativo Gemini Enterprise:<br/>Métricas para Desarrolladores<br/>(Usuarios Activos / Totales Globales)"]
+        AuditLogs["Cloud Audit Logs (IAM Habilitado):<br/>ADMIN_READ | DATA_READ | DATA_WRITE"]
+        SinkAI["Log Sink Cross-Project:<br/>antigravity-usage-sink<br/>(SA: service-162476727678@...)"]
+
+        API -->|"Lotes (Batch UTC)"| NativeMetrics
+        API -->|"Emite evento RPC"| AuditLogs
+        AuditLogs -->|"Filtra llamadas de IA"| SinkAI
     end
 
-    subgraph GCP_Workload["Proyecto de Telemetría (BigQuery)"]
-        Dataset[("Dataset BigQuery:<br/>antigravity_telemetry")]
-        TableAudit[("Tabla: cloudaudit_..._data_access<br/>(Auditoría RPC / Métodos)")]
-        TableTokens[("Tabla Particionada:<br/>antigravity_token_usage")]
-        ViewSummary[["Vista Analítica:<br/>antigravity_developer_token_summary"]]
-        ViewUsage[["Vista Auditoría:<br/>antigravity_user_usage_summary"]]
+    subgraph GCP_BQ["📊 Proyecto GCP Telemetría y Bodega: desa01-uip"]
+        direction TB
+        SinkDesa["Log Sink Local (Respaldo):<br/>antigravity-usage-sink<br/>(SA: service-910389366056@...)"]
+        
+        subgraph Dataset["Dataset BigQuery: antigravity_telemetry (Región: US)"]
+            TableTokens[("Tabla Particionada (DAY):<br/>antigravity_token_usage<br/>• developer_user<br/>• model_name (3.7 Flash, 3.1 Pro, 4 Argon)<br/>• prompt_tokens (Input)<br/>• candidates_tokens (Output)<br/>• project_id (pro-gemini / desa01)")]
+            TableAudit[("Tabla Particionada:<br/>cloudaudit_googleapis_com_data_access<br/>• principalEmail<br/>• methodName<br/>• callerIp / UserAgent")]
+            ViewTokens[["Vista Analítica:<br/>antigravity_developer_token_summary<br/>(Consumo por Desarrollador, Fecha y Modelo)"]]
+            ViewAudit[["Vista de Auditoría:<br/>antigravity_user_usage_summary<br/>(Invocaciones RPC por Usuario)"]]
+        end
+
+        SinkDesa -->|"Streaming Logs"| TableAudit
+        TableTokens --> ViewTokens
+        TableAudit --> ViewAudit
     end
 
-    CLI -->|"1. Solicitud RPC"| API
-    API -->|"2. Emite Log de Acceso"| CloudAudit
-    CloudAudit -->|"3. Enruta Eventos"| Sink
-    Sink -->|"4. Streaming Ingestion"| TableAudit
-
-    CLI -->|"5. Dispara Hook al finalizar turno"| Hook
-    Hook -->|"6. Lee pasos y calcula tokens"| PyHook
-    Transcript -.->|"Lee interacción"| PyHook
-    PyHook -->|"7. Streaming directo"| TableTokens
-
-    TableAudit --> ViewUsage
-    TableTokens --> ViewSummary
+    IDE ==>|"A. Petición de Inferencia LLM"| API
+    PyHook ==>|"B. Streaming Directo (insert_rows_json)<br/>Tiempo Real"| TableTokens
+    Backfill -.->|"Carga histórica"| TableTokens
+    SinkAI ==>|"C. Enrutamiento Cross-Project"| TableAudit
 ```
 
-### ¿Por qué dos capas?
-1. **Capa Cloud Audit Sink (`cloudaudit_..._data_access`):** Audita llamadas de red, identidades IAM (`principalEmail`), métodos RPC (`StreamGenerateContent`), IPs y versiones de cliente. No contiene contadores de tokens ni texto por protección de datos.
-2. **Capa Lifecycle Hook (`antigravity_token_usage`):** Se ejecuta en el cliente Antigravity, extrayendo el modelo activo (`Gemini 3.8 Flash (High)`, `Gemini 2.5 Pro`, etc.), tokens de prompt (input) y candidatos (output) con streaming directo a BigQuery.
+### ¿Cómo interactúan los componentes en la arquitectura final?
+1. **Camino A — Inferencia y Licenciamiento (`pro-gemini-enterprise-uip-mh`):**
+   Antigravity se conecta al proyecto `pro-gemini-enterprise-uip-mh` donde consume la licencia de Gemini Enterprise y el presupuesto de pago por uso (\$20). Este tráfico alimenta el tablero nativo de *Métricas de herramientas para desarrolladores* de ese proyecto.
+2. **Camino B — Telemetría Granular de Tokens y Modelos en Tiempo Real (`telemetry_hook.py` $\rightarrow$ `desa01-uip`):**
+   Al finalizar cada turno del agente, el hook global (`~/.gemini/config/hooks.json`) ejecuta `telemetry_hook.py`. Este script lee el historial local (`transcript.jsonl`), detecta dinámicamente cualquier cambio de modelo en el chat (`Gemini 3.7 Flash`, `Gemini 3.1 Pro`, `Gemini 3.6 Flash`, `Gemini 4 Argon`), calcula los tokens exactos de entrada y salida con `tiktoken`, detecta el proyecto activo (`pro-gemini-enterprise-uip-mh`) y envía la fila directamente a la tabla `desa01-uip.antigravity_telemetry.antigravity_token_usage`.
+3. **Camino C — Auditoría de Seguridad y Red (`Cloud Audit Logs` $\rightarrow$ `antigravity-usage-sink` $\rightarrow$ `desa01-uip`):**
+   Con los registros `ADMIN_READ`, `DATA_READ` y `DATA_WRITE` activos en ambos proyectos, los Sinks enrutan las llamadas de red de las APIs `cloudaicompanion.googleapis.com` y `businessaicode.googleapis.com` hacia el dataset `antigravity_telemetry` en `desa01-uip`.
 
 ---
 
