@@ -4,9 +4,9 @@ Esta guía proporciona la arquitectura y el procedimiento paso a paso para despl
 
 ---
 
-## 1. Arquitectura Final de la Solución (Cross-Project)
+## 1. Arquitectura de la Solución
 
-El sistema opera bajo un modelo híbrido **Cross-Project** en dos capas independientes (Telemetría Directa de Cliente + Auditoría Cloud Logging), separando el proyecto de licenciamiento/inferencia de IA (`pro-gemini-enterprise-uip-mh`) del proyecto central de almacenamiento analítico en BigQuery (`desa01-uip`):
+El sistema opera bajo un modelo híbrido en dos capas independientes (**Telemetría Directa de Cliente** + **Auditoría Cloud Logging**), permitiendo capturar en tiempo real tanto el consumo granular de tokens y modelos como la auditoría de red centralizada en BigQuery:
 
 ```mermaid
 flowchart TB
@@ -30,30 +30,27 @@ flowchart TB
         Transcript -.->|"Lectura masiva inicial"| Backfill
     end
 
-    subgraph GCP_AI["☁️ Proyecto GCP Motor IA: pro-gemini-enterprise-uip-mh"]
+    subgraph GCP_AI["☁️ Capa de Inferencia y Auditoría (Google Cloud)"]
         direction TB
-        API["APIs de Inferencia:<br/>cloudaicompanion.googleapis.com<br/>businessaicode.googleapis.com<br/>(Licencia Enterprise + Pago por Uso $20)"]
+        API["APIs de Inferencia:<br/>cloudaicompanion.googleapis.com<br/>businessaicode.googleapis.com"]
         NativeMetrics["Panel Nativo Gemini Enterprise:<br/>Métricas para Desarrolladores<br/>(Usuarios Activos / Totales Globales)"]
-        AuditLogs["Cloud Audit Logs (IAM Habilitado):<br/>ADMIN_READ | DATA_READ | DATA_WRITE"]
-        SinkAI["Log Sink Cross-Project:<br/>antigravity-usage-sink<br/>(SA: service-162476727678@...)"]
+        AuditLogs["Cloud Audit Logs (IAM):<br/>ADMIN_READ | DATA_READ | DATA_WRITE"]
+        SinkAI["Log Sink de Enrutamiento:<br/>antigravity-usage-sink"]
 
         API -->|"Lotes (Batch UTC)"| NativeMetrics
         API -->|"Emite evento RPC"| AuditLogs
         AuditLogs -->|"Filtra llamadas de IA"| SinkAI
     end
 
-    subgraph GCP_BQ["📊 Proyecto GCP Telemetría y Bodega: desa01-uip"]
+    subgraph GCP_BQ["📊 Capa Analítica y Almacenamiento (Google BigQuery)"]
         direction TB
-        SinkDesa["Log Sink Local (Respaldo):<br/>antigravity-usage-sink<br/>(SA: service-910389366056@...)"]
-        
-        subgraph Dataset["Dataset BigQuery: antigravity_telemetry (Región: US)"]
-            TableTokens[("Tabla Particionada (DAY):<br/>antigravity_token_usage<br/>• developer_user<br/>• model_name (3.7 Flash, 3.1 Pro, 4 Argon)<br/>• prompt_tokens (Input)<br/>• candidates_tokens (Output)<br/>• project_id (pro-gemini / desa01)")]
+        subgraph Dataset["Dataset BigQuery: antigravity_telemetry"]
+            TableTokens[("Tabla Particionada (DAY):<br/>antigravity_token_usage<br/>• developer_user<br/>• model_name (Flash, Pro, Argon)<br/>• prompt_tokens (Input)<br/>• candidates_tokens (Output)<br/>• total_tokens")]
             TableAudit[("Tabla Particionada:<br/>cloudaudit_googleapis_com_data_access<br/>• principalEmail<br/>• methodName<br/>• callerIp / UserAgent")]
             ViewTokens[["Vista Analítica:<br/>antigravity_developer_token_summary<br/>(Consumo por Desarrollador, Fecha y Modelo)"]]
             ViewAudit[["Vista de Auditoría:<br/>antigravity_user_usage_summary<br/>(Invocaciones RPC por Usuario)"]]
         end
 
-        SinkDesa -->|"Streaming Logs"| TableAudit
         TableTokens --> ViewTokens
         TableAudit --> ViewAudit
     end
@@ -61,16 +58,16 @@ flowchart TB
     IDE ==>|"A. Petición de Inferencia LLM"| API
     PyHook ==>|"B. Streaming Directo (insert_rows_json)<br/>Tiempo Real"| TableTokens
     Backfill -.->|"Carga histórica"| TableTokens
-    SinkAI ==>|"C. Enrutamiento Cross-Project"| TableAudit
+    SinkAI ==>|"C. Enrutamiento de Logs"| TableAudit
 ```
 
-### ¿Cómo interactúan los componentes en la arquitectura final?
-1. **Camino A — Inferencia y Licenciamiento (`pro-gemini-enterprise-uip-mh`):**
-   Antigravity se conecta al proyecto `pro-gemini-enterprise-uip-mh` donde consume la licencia de Gemini Enterprise y el presupuesto de pago por uso (\$20). Este tráfico alimenta el tablero nativo de *Métricas de herramientas para desarrolladores* de ese proyecto.
-2. **Camino B — Telemetría Granular de Tokens y Modelos en Tiempo Real (`telemetry_hook.py` $\rightarrow$ `desa01-uip`):**
-   Al finalizar cada turno del agente, el hook global (`~/.gemini/config/hooks.json`) ejecuta `telemetry_hook.py`. Este script lee el historial local (`transcript.jsonl`), detecta dinámicamente cualquier cambio de modelo en el chat (`Gemini 3.7 Flash`, `Gemini 3.1 Pro`, `Gemini 3.6 Flash`, `Gemini 4 Argon`), calcula los tokens exactos de entrada y salida con `tiktoken`, detecta el proyecto activo (`pro-gemini-enterprise-uip-mh`) y envía la fila directamente a la tabla `desa01-uip.antigravity_telemetry.antigravity_token_usage`.
-3. **Camino C — Auditoría de Seguridad y Red (`Cloud Audit Logs` $\rightarrow$ `antigravity-usage-sink` $\rightarrow$ `desa01-uip`):**
-   Con los registros `ADMIN_READ`, `DATA_READ` y `DATA_WRITE` activos en ambos proyectos, los Sinks enrutan las llamadas de red de las APIs `cloudaicompanion.googleapis.com` y `businessaicode.googleapis.com` hacia el dataset `antigravity_telemetry` en `desa01-uip`.
+### ¿Cómo interactúan los componentes en la arquitectura?
+1. **Camino A — Inferencia y Métricas Nativas:**
+   Antigravity se conecta a las APIs de IA en Google Cloud (`cloudaicompanion.googleapis.com` / `businessaicode.googleapis.com`). Este tráfico alimenta el tablero nativo de *Métricas de herramientas para desarrolladores* en lotes periódicos.
+2. **Camino B — Telemetría Granular de Tokens y Modelos en Tiempo Real (`telemetry_hook.py` $\rightarrow$ `BigQuery`):**
+   Al finalizar cada turno del agente, el hook global (`~/.gemini/config/hooks.json`) ejecuta `telemetry_hook.py`. Este script lee el historial local (`transcript.jsonl`), detecta dinámicamente cualquier cambio de modelo en el chat, calcula los tokens exactos de entrada y salida con `tiktoken`, y envía la fila directamente a la tabla particionada `antigravity_token_usage` en BigQuery.
+3. **Camino C — Auditoría de Seguridad y Red (`Cloud Audit Logs` $\rightarrow$ `antigravity-usage-sink` $\rightarrow$ `BigQuery`):**
+   Con los registros `ADMIN_READ`, `DATA_READ` y `DATA_WRITE` activos en IAM, el Sink captura las llamadas de red de las APIs y las enruta automáticamente hacia la tabla `cloudaudit_googleapis_com_data_access` en BigQuery.
 
 ---
 
