@@ -133,26 +133,48 @@ def backfill():
     print(f"Tokens de Output: {total_candidate_tokens:,}")
     print(f"Total Tokens: {total_prompt_tokens + total_candidate_tokens:,}")
     
-    if not all_rows:
-        print("No hay registros para insertar.")
-        return
+    state_dir = os.path.expanduser("~/.gemini/antigravity")
+    if not os.path.exists(state_dir):
+        state_dir = os.path.expanduser("~/.gemini/antigravity-cli")
+    os.makedirs(state_dir, exist_ok=True)
+    state_file = os.path.join(state_dir, ".telemetry_state.json")
+    state = {}
+    if os.path.exists(state_file):
+        try:
+            with open(state_file, "r", encoding="utf-8") as f:
+                state = json.load(f)
+        except Exception:
+            state = {}
 
-    table_ref = f"{project_id}.{dataset_name}.antigravity_token_usage"
-    print(f"Truncando la tabla {table_ref} para re-ingestar con los nombres de modelos corregidos...")
-    dml_query = f"TRUNCATE TABLE `{table_ref}`"
-    client.query(dml_query).result()
+    rows_to_insert = []
+    for r in all_rows:
+        cid = r["conversation_id"]
+        sidx = r["step_index"]
+        if sidx > state.get(cid, -1):
+            rows_to_insert.append(r)
+
+    if not rows_to_insert:
+        print("Todas las interacciones historicas de este desarrollador ya fueron cargadas previamente.")
+        return
 
     batch_size = 250
     inserted = 0
-    for i in range(0, len(all_rows), batch_size):
-        batch = all_rows[i:i+batch_size]
+    for i in range(0, len(rows_to_insert), batch_size):
+        batch = rows_to_insert[i:i+batch_size]
         err = client.insert_rows_json(table_id, batch)
         if err:
             print(f"Error en lote {i}: {err}")
         else:
             inserted += len(batch)
-            print(f"Cargado lote {i // batch_size + 1}/{(len(all_rows) + batch_size - 1) // batch_size} ({inserted}/{len(all_rows)} filas)")
-            
+            for r in batch:
+                cid = r["conversation_id"]
+                if r["step_index"] > state.get(cid, -1):
+                    state[cid] = r["step_index"]
+            print(f"Cargado lote {i // batch_size + 1}/{(len(rows_to_insert) + batch_size - 1) // batch_size} ({inserted}/{len(rows_to_insert)} filas)")
+
+    with open(state_file, "w", encoding="utf-8") as f:
+        json.dump(state, f)
+
     print(f"\n[OK] Backfill completado exitosamente: {inserted} filas insertadas en {table_id}")
 
 if __name__ == "__main__":
