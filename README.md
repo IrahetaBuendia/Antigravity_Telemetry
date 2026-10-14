@@ -71,16 +71,35 @@ flowchart TB
 
 ---
 
-## 2. Requisitos Previos y Variables de Entorno
+## 2. Estructura del Repositorio
 
-Defina las variables del entorno en su terminal:
+```text
+Antigravity_Telemetry/
+├── .agents/
+│   ├── hooks.json                      # Configuración del hook a nivel de proyecto
+│   └── scripts/
+│       ├── telemetry_hook.py           # Hook en tiempo real (captura tokens y modelo tras cada respuesta)
+│       └── backfill_token_usage.py     # Script de carga histórica masiva de conversaciones previas
+├── deploy_infrastructure.py            # Despliegue automatizado de Dataset, Tabla y Vista en BigQuery
+├── install_client.ps1                  # Instalador automático del hook global en Windows para desarrolladores
+├── query_reports.py                    # Script de consulta rápida de reportes en consola
+├── requirements.txt                    # Dependencias de Python (google-cloud-bigquery, tiktoken)
+└── README.md                           # Documentación técnica y de arquitectura
+```
 
+---
+
+## 3. Requisitos Previos y Variables de Entorno
+
+Defina las variables de entorno según su arquitectura de Google Cloud (pueden apuntar al mismo proyecto o a proyectos separados si el consumo de IA y el almacenamiento en BigQuery están en distintos proyectos):
+
+En **Bash / Linux / macOS**:
 ```bash
 # Proyecto donde se almacenarán las tablas y vistas de BigQuery
-export WORKLOAD_PROJECT_ID="desa01-uip"
+export WORKLOAD_PROJECT_ID="<PROYECTO_TELEMETRIA_BQ>"
 
-# Proyecto donde Antigravity ejecuta las consultas de IA (donde está configurado el CLI)
-export AI_PROJECT_ID="desa01-uip"
+# Proyecto donde Antigravity ejecuta las consultas de IA
+export AI_PROJECT_ID="<PROYECTO_IA>"
 
 # Región de almacenamiento en BigQuery (ej. US, europe-west1)
 export BQ_LOCATION="US"
@@ -91,28 +110,43 @@ export DATASET_NAME="antigravity_telemetry"
 
 En **PowerShell** (Windows):
 ```powershell
-$env:WORKLOAD_PROJECT_ID="desa01-uip"
-$env:AI_PROJECT_ID="desa01-uip"
+$env:WORKLOAD_PROJECT_ID="<PROYECTO_TELEMETRIA_BQ>"
+$env:AI_PROJECT_ID="<PROYECTO_IA>"
 $env:BQ_LOCATION="US"
 $env:DATASET_NAME="antigravity_telemetry"
 ```
 
-Asegúrese de contar con las herramientas instaladas y autenticadas:
-* `gcloud` CLI (`gcloud auth login` y `gcloud auth application-default login`)
-* `bq` CLI
-* Python 3.10+ con librerías: `pip install google-cloud-bigquery tiktoken`
+Herramientas requeridas:
+* `gcloud` CLI autenticado (`gcloud auth login` y `gcloud auth application-default login`)
+* Python 3.10+ con dependencias instaladas:
+  ```bash
+  pip install -r requirements.txt
+  ```
 
 ---
 
-## 3. Fase 1: Creación del Dataset e Infraestructura BigQuery
+## 4. Fase 1: Despliegue de Infraestructura en BigQuery
 
-### Paso 3.1: Habilitar APIs en Google Cloud
+Puede desplegar toda la infraestructura en BigQuery de forma automática ejecutando el script incluido o manualmente mediante la CLI.
+
+### Opción A: Despliegue Automatizado (Recomendado)
+```bash
+python deploy_infrastructure.py
+```
+Este script crea automáticamente:
+1. El dataset `antigravity_telemetry` en la ubicación configurada (`US`).
+2. La tabla particionada por día `antigravity_token_usage`.
+3. La vista analítica consolidada `antigravity_developer_token_summary`.
+
+### Opción B: Creación Manual con `gcloud` y `bq`
+
+#### Paso 4.1: Habilitar APIs en Google Cloud
 ```bash
 gcloud services enable bigquery.googleapis.com logging.googleapis.com --project="${WORKLOAD_PROJECT_ID}"
-gcloud services enable logging.googleapis.com businessaicode.googleapis.com --project="${AI_PROJECT_ID}"
+gcloud services enable logging.googleapis.com businessaicode.googleapis.com cloudaicompanion.googleapis.com --project="${AI_PROJECT_ID}"
 ```
 
-### Paso 3.2: Crear el Dataset de Telemetría
+#### Paso 4.2: Crear el Dataset de Telemetría
 ```bash
 bq --location="${BQ_LOCATION}" mk \
   --dataset \
@@ -120,9 +154,7 @@ bq --location="${BQ_LOCATION}" mk \
   "${WORKLOAD_PROJECT_ID}:${DATASET_NAME}"
 ```
 
-### Paso 3.3: Crear la Tabla de Tokens Particionada por Día
-Cree la tabla concreta `antigravity_token_usage`:
-
+#### Paso 4.3: Crear la Tabla de Tokens Particionada por Día
 ```bash
 bq mk --table \
   --time_partitioning_field timestamp \
@@ -133,28 +165,39 @@ bq mk --table \
 ```
 
 > [!NOTE]
-> Esquema de campos:
-> - `timestamp` (TIMESTAMP): Marca temporal exacta en formato UTC.
-> - `usage_date` (DATE): Fecha de particionamiento `YYYY-MM-DD`.
-> - `developer_user` (STRING): Correo del desarrollador que ejecutó la consulta.
-> - `conversation_id` (STRING): UUID único de la sesión de trabajo.
-> - `step_index` (INTEGER): Índice ordinal del turno o paso dentro de la sesión.
-> - `model_name` (STRING): Nombre exacto del modelo LLM utilizado.
-> - `prompt_tokens` (INTEGER): Tokens de entrada consumidos (contexto + prompt).
-> - `candidates_tokens` (INTEGER): Tokens de salida generados (respuestas + pensamiento).
-> - `total_tokens` (INTEGER): Sumatoria total (`prompt_tokens + candidates_tokens`).
-> - `client_version` (STRING): Versión de la herramienta Antigravity (ej. `antigravity/cli/1.2.14`).
-> - `project_id` (STRING): Proyecto GCP destino de la inferencia.
-> - `workspace_path` (STRING): Ruta de trabajo local en la máquina del desarrollador.
+> **Esquema de campos de `antigravity_token_usage`:**
+> - `timestamp` (`TIMESTAMP`): Marca temporal exacta en formato UTC.
+> - `usage_date` (`DATE`): Fecha de particionamiento `YYYY-MM-DD`.
+> - `developer_user` (`STRING`): Correo del desarrollador autenticado en `gcloud`.
+> - `conversation_id` (`STRING`): UUID único de la sesión de trabajo.
+> - `step_index` (`INTEGER`): Índice ordinal del turno o paso dentro de la sesión.
+> - `model_name` (`STRING`): Nombre exacto del modelo LLM utilizado (ej. `Gemini 3.8 Flash (High)`, `Gemini 3.1 Pro (High)`, `Gemini 4 Argon (Medium)`).
+> - `prompt_tokens` (`INTEGER`): Tokens de entrada consumidos (contexto acumulado + prompt).
+> - `candidates_tokens` (`INTEGER`): Tokens de salida generados (respuesta + razonamiento + llamadas a herramientas).
+> - `total_tokens` (`INTEGER`): Sumatoria total (`prompt_tokens + candidates_tokens`).
+> - `client_version` (`STRING`): Versión del cliente Antigravity.
+> - `project_id` (`STRING`): Proyecto GCP activo donde se ejecutó la inferencia de IA.
+> - `workspace_path` (`STRING`): Ruta del proyecto local en la máquina del desarrollador.
 
 ---
 
-## 4. Fase 2: Configuración del Cloud Logging Sink
+## 5. Fase 2: Configuración de Cloud Audit Logs y Log Sink
 
-El Log Sink enruta los eventos de auditoría desde el proyecto de IA (`AI_PROJECT_ID`) hacia el dataset en el proyecto de telemetría (`WORKLOAD_PROJECT_ID`).
+Por defecto, Google Cloud desactiva los registros de acceso a datos (`DATA_READ` y `DATA_WRITE`) para evitar costos no deseados. Para auditar las llamadas de red a las APIs de IA, es indispensable habilitarlos en IAM.
 
-### Paso 4.1: Crear el Sink Cross-Project
-Ejecute el comando para crear el sink `antigravity-usage-sink`:
+### Paso 5.1: Habilitar Cloud Audit Logs (IAM)
+En el proyecto donde se ejecutan las consultas de IA (`AI_PROJECT_ID`):
+1. En Google Cloud Console, diríjase a **IAM & Admin** > **Audit Logs** (Registros de auditoría).
+2. Filtre y seleccione los siguientes dos servicios:
+   * **Gemini for Google Cloud API** (`cloudaicompanion.googleapis.com`)
+   * **Business AI Code API** (`businessaicode.googleapis.com`)
+3. Para ambos servicios, marque las 3 casillas de tipos de registro y guarde los cambios:
+   * `[x]` **Lectura de administrador** (`ADMIN_READ`)
+   * `[x]` **Lectura de datos** (`DATA_READ`)
+   * `[x]` **Escritura de datos** (`DATA_WRITE`)
+
+### Paso 5.2: Crear el Cloud Logging Sink hacia BigQuery
+Ejecute el siguiente comando para crear el sink `antigravity-usage-sink` que enruta los eventos hacia BigQuery:
 
 ```bash
 gcloud logging sinks create antigravity-usage-sink \
@@ -164,366 +207,70 @@ gcloud logging sinks create antigravity-usage-sink \
   --use-partitioned-tables
 ```
 
-### Paso 4.2: Asignar Permisos IAM a la Service Account del Sink
-Al crear el sink, Cloud Logging genera una cuenta de servicio (`writerIdentity`). Obtenla y asígnale el rol `roles/bigquery.dataEditor`:
+### Paso 5.3: Asignar Permisos IAM a la Cuenta de Servicio del Sink
+Al crear el sink, Cloud Logging genera una identidad de escritura (`writerIdentity`). Otorgue permisos de edición sobre el dataset en BigQuery:
 
 ```bash
-# 1. Obtener la identidad del escritor del sink
+# 1. Obtener la cuenta de servicio generada por el sink
 WRITER_SA=$(gcloud logging sinks describe antigravity-usage-sink \
   --project="${AI_PROJECT_ID}" \
   --format='value(writerIdentity)')
 
-echo "Writer Identity: ${WRITER_SA}"
-
-# 2. Otorgar permisos de escritura sobre el proyecto de telemetría
+# 2. Otorgar rol de Editor de Datos de BigQuery
 gcloud projects add-iam-policy-binding "${WORKLOAD_PROJECT_ID}" \
   --member="${WRITER_SA}" \
   --role="roles/bigquery.dataEditor"
 ```
 
-*(Opcional: Si el CLI también opera directamente sobre `WORKLOAD_PROJECT_ID`, repita la creación de un sink local en dicho proyecto).*
+---
 
-> [!TIP]
-> Tan pronto como los desarrolladores ejecuten consultas, Cloud Logging creará automáticamente la tabla particionada `${WORKLOAD_PROJECT_ID}.${DATASET_NAME}.cloudaudit_googleapis_com_data_access`.
+## 6. Fase 3: Instalación del Hook en Equipos de Desarrolladores
+
+El hook `PostInvocation` se ejecuta automáticamente al terminar cada respuesta del agente en Antigravity, leyendo el historial local (`transcript.jsonl`), detectando cambios dinámicos de modelo y enviando las métricas por streaming a BigQuery.
+
+### Opción A: Instalación Global Automática en Windows (Recomendado)
+Ejecute el instalador PowerShell incluido en la raíz del proyecto:
+
+```powershell
+.\install_client.ps1
+```
+El instalador realiza automáticamente:
+1. Instalación de dependencias (`google-cloud-bigquery`, `tiktoken`).
+2. Copia de `.agents/scripts/telemetry_hook.py` a `~/.gemini/scripts/telemetry_hook.py`.
+3. Creación del archivo global `~/.gemini/config/hooks.json` para que aplique a **todos** los proyectos del desarrollador.
+4. Verificación de credenciales ADC (`gcloud auth application-default login`).
+
+### Opción B: Detalle Técnico de `telemetry_hook.py`
+El script incluido en `.agents/scripts/telemetry_hook.py` incorpora:
+* **Detección exacta de cambios de modelo con decimales y paréntesis:** Utiliza la expresión regular `r"Model Selection(?:`|\s)*from\s+.*?\s+to\s+(.*?)\.(?:\s+No need|\s+If reporting|\n|</USER_SETTINGS_CHANGE>|$)"` para capturar nombres como `Gemini 3.7 Flash (Medium)`, `Gemini 3.1 Pro (Low)` o `Gemini 4 Argon (Medium)` sin truncarlos en el punto decimal.
+* **Detección dinámica del proyecto de IA (`get_active_ai_project()`):** Registra en el campo `project_id` el proyecto de IA activo en el entorno del desarrollador, enviando siempre las filas al dataset central en `WORKLOAD_PROJECT_ID`.
+* **Control de estado local (`.telemetry_state.json`):** Registra el último `step_index` enviado por cada `conversation_id` para evitar duplicados.
 
 ---
 
-## 5. Fase 3: Despliegue del Hook de Telemetría en Antigravity
+## 7. Fase 4: Ingesta Histórica (Backfill de Sesiones Previas)
 
-El hook se ejecuta de forma transparente en la máquina de cada desarrollador tras cada turno del modelo (`PostInvocation`), garantizando la captura de tokens sin interferir en el flujo de trabajo.
+Para procesar y cargar en BigQuery todas las conversaciones históricas almacenadas localmente antes de la instalación del hook:
 
-### Paso 5.1: Crear el Script de Ingesta (`telemetry_hook.py`)
-Guarde este archivo en el repositorio en la ruta `.agents/scripts/telemetry_hook.py`:
-
-```python
-#!/usr/bin/env python3
-"""
-Antigravity Telemetry Hook: Captura tokens por interacción y envía streaming a BigQuery.
-"""
-import sys
-import json
-import os
-import re
-import datetime
-import subprocess
-
-def get_developer_user():
-    try:
-        user = subprocess.check_output(
-            ["gcloud", "config", "get-value", "account"],
-            stderr=subprocess.DEVNULL,
-            text=True
-        ).strip()
-        if user and "@" in user:
-            return user
-    except Exception:
-        pass
-    return os.environ.get("USER", os.environ.get("USERNAME", "unknown_developer"))
-
-def get_default_model():
-    try:
-        settings_path = os.path.expanduser("~/.gemini/antigravity-cli/settings.json")
-        if os.path.exists(settings_path):
-            with open(settings_path, "r", encoding="utf-8") as f:
-                return json.load(f).get("model", "Gemini 3.8 Flash (High)")
-    except Exception:
-        pass
-    return "Gemini 3.8 Flash (High)"
-
-def main():
-    response_payload = {"injectSteps": []}
-    
-    try:
-        input_data = sys.stdin.read()
-        if not input_data.strip():
-            return
-            
-        data = json.loads(input_data)
-        conv_id = data.get("conversationId")
-        transcript_path = data.get("transcriptPath")
-        model_name = data.get("modelName") or get_default_model()
-        workspace_paths = data.get("workspacePaths", [])
-        workspace_path = workspace_paths[0] if workspace_paths else os.getcwd()
-        
-        if not transcript_path or not os.path.exists(transcript_path):
-            return
-            
-        import tiktoken
-        from google.cloud import bigquery
-        
-        enc = tiktoken.get_encoding("cl100k_base")
-        
-        # Archivo local de control de estado para evitar duplicados
-        state_dir = os.path.expanduser("~/.gemini/antigravity-cli")
-        os.makedirs(state_dir, exist_ok=True)
-        state_file = os.path.join(state_dir, ".telemetry_state.json")
-        state = {}
-        if os.path.exists(state_file):
-            try:
-                with open(state_file, "r", encoding="utf-8") as f:
-                    state = json.load(f)
-            except Exception:
-                state = {}
-                
-        last_processed_step = state.get(conv_id, -1)
-        
-        rows_to_insert = []
-        running_prompt_tokens = 500  # Estimación base del prompt de sistema
-        max_step_seen = last_processed_step
-        
-        with open(transcript_path, "r", encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                try:
-                    step = json.loads(line)
-                except Exception:
-                    continue
-                    
-                stype = step.get("type")
-                source = step.get("source")
-                content = step.get("content") or ""
-                thinking = step.get("thinking") or ""
-                tool_calls = step.get("tool_calls") or []
-                step_idx = step.get("step_index", 0)
-                created_at = step.get("created_at") or datetime.datetime.now(datetime.timezone.utc).isoformat()
-                
-                # Detectar cambios explícitos de modelo durante la conversación
-                if "<USER_SETTINGS_CHANGE>" in content and "Model Selection" in content:
-                    m = re.search(r"Model Selection` from \S+ to (.*?)\.\s+(?:No need|If reporting|$)", content)
-                    if m:
-                        model_name = m.group(1).strip()
-                
-                if stype in ["USER_INPUT", "GENERIC"] or source in ["USER_EXPLICIT", "SYSTEM"]:
-                    running_prompt_tokens += len(enc.encode(str(content)))
-                elif stype == "PLANNER_RESPONSE" or source == "MODEL":
-                    cand_text = str(content) + str(thinking) + (json.dumps(tool_calls) if tool_calls else "")
-                    c_tok = len(enc.encode(cand_text)) if cand_text else 0
-                    
-                    if step_idx > last_processed_step:
-                        usage_date = created_at[:10] if len(created_at) >= 10 else datetime.date.today().isoformat()
-                        p_tok = running_prompt_tokens
-                        rows_to_insert.append({
-                            "timestamp": created_at,
-                            "usage_date": usage_date,
-                            "developer_user": get_developer_user(),
-                            "conversation_id": conv_id,
-                            "step_index": step_idx,
-                            "model_name": model_name,
-                            "prompt_tokens": p_tok,
-                            "candidates_tokens": c_tok,
-                            "total_tokens": p_tok + c_tok,
-                            "client_version": "antigravity/cli/1.2.14",
-                            "project_id": os.environ.get("AI_PROJECT_ID", "desa01-uip"),
-                            "workspace_path": workspace_path
-                        })
-                        if step_idx > max_step_seen:
-                            max_step_seen = step_idx
-                            
-                    running_prompt_tokens += c_tok
-                    
-        if rows_to_insert:
-            client = bigquery.Client(project=os.environ.get("WORKLOAD_PROJECT_ID", "desa01-uip"))
-            table_id = f"{client.project}.antigravity_telemetry.antigravity_token_usage"
-            client.insert_rows_json(table_id, rows_to_insert)
-            
-            state[conv_id] = max_step_seen
-            with open(state_file, "w", encoding="utf-8") as f:
-                json.dump(state, f)
-                
-    except Exception as e:
-        err_log = os.path.expanduser("~/.gemini/antigravity-cli/telemetry_hook.log")
-        with open(err_log, "a", encoding="utf-8") as f:
-            f.write(f"[{datetime.datetime.now().isoformat()}] Error: {str(e)}\n")
-    finally:
-        print(json.dumps(response_payload))
-
-if __name__ == "__main__":
-    main()
-```
-
-### Paso 5.2: Configuración del Hook (`hooks.json`)
-Cree el archivo `.agents/hooks.json` en la raíz de su proyecto (y opcionalmente en `~/.gemini/config/hooks.json` para cobertura global en la máquina):
-
-```json
-{
-  "antigravity-token-telemetry": {
-    "enabled": true,
-    "PostInvocation": [
-      {
-        "type": "command",
-        "command": "python .agents/scripts/telemetry_hook.py",
-        "timeout": 30
-      }
-    ]
-  }
-}
-```
-
----
-
-## 6. Fase 4: Ingesta Histórica (Backfill de Sesiones Previas)
-
-Para cargar todas las conversaciones históricas ya ejecutadas por los desarrolladores antes de habilitar el hook:
-
-### Paso 6.1: Script de Backfill (`backfill_token_usage.py`)
-Guarde este archivo en `.agents/scripts/backfill_token_usage.py`:
-
-```python
-#!/usr/bin/env python3
-"""
-Backfill histórico de conversaciones locales de Antigravity hacia BigQuery.
-"""
-import os
-import glob
-import json
-import re
-import datetime
-import subprocess
-import tiktoken
-from google.cloud import bigquery
-
-def get_developer_user():
-    try:
-        user = subprocess.check_output(
-            ["gcloud", "config", "get-value", "account"],
-            stderr=subprocess.DEVNULL,
-            text=True
-        ).strip()
-        if user and "@" in user:
-            return user
-    except Exception:
-        pass
-    return os.environ.get("USER", os.environ.get("USERNAME", "unknown_developer"))
-
-def get_default_model():
-    try:
-        settings_path = os.path.expanduser("~/.gemini/antigravity-cli/settings.json")
-        if os.path.exists(settings_path):
-            with open(settings_path, "r", encoding="utf-8") as f:
-                return json.load(f).get("model", "Gemini 3.8 Flash (High)")
-    except Exception:
-        pass
-    return "Gemini 3.8 Flash (High)"
-
-def backfill():
-    project_id = os.environ.get("WORKLOAD_PROJECT_ID", "desa01-uip")
-    client = bigquery.Client(project=project_id)
-    table_id = f"{project_id}.antigravity_telemetry.antigravity_token_usage"
-    
-    enc = tiktoken.get_encoding("cl100k_base")
-    conv_dir = os.path.expanduser("~/.gemini/antigravity/brain")
-    if not os.path.exists(conv_dir):
-        conv_dir = os.path.expanduser("~/.gemini/antigravity-cli/brain")
-        
-    transcripts = sorted(glob.glob(f"{conv_dir}/*/.system_generated/logs/transcript.jsonl"))
-    
-    print(f"Descubiertos {len(transcripts)} historiales de conversación.")
-    dev_user = get_developer_user()
-    default_model = get_default_model()
-    print(f"Desarrollador asignado: {dev_user}")
-    print(f"Modelo por defecto: {default_model}")
-    
-    all_rows = []
-    total_prompt_tokens = 0
-    total_candidate_tokens = 0
-    
-    for t_path in transcripts:
-        # Extraer el ID de conversación del directorio padre
-        parts = os.path.normpath(t_path).split(os.sep)
-        conv_id = parts[-4] if len(parts) >= 4 else "unknown_conversation"
-        current_model = default_model
-        running_prompt_tokens = 500
-        
-        try:
-            with open(t_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    if not line.strip():
-                        continue
-                    try:
-                        step = json.loads(line)
-                    except Exception:
-                        continue
-                        
-                    stype = step.get("type")
-                    source = step.get("source")
-                    content = step.get("content") or ""
-                    thinking = step.get("thinking") or ""
-                    tool_calls = step.get("tool_calls") or []
-                    step_idx = step.get("step_index", 0)
-                    created_at = step.get("created_at") or datetime.datetime.now(datetime.timezone.utc).isoformat()
-                    
-                    if "<USER_SETTINGS_CHANGE>" in content and "Model Selection" in content:
-                        m = re.search(r"Model Selection` from \S+ to (.*?)\.\s+(?:No need|If reporting|$)", content)
-                        if m:
-                            current_model = m.group(1).strip()
-                            
-                    if stype in ["USER_INPUT", "GENERIC"] or source in ["USER_EXPLICIT", "SYSTEM"]:
-                        running_prompt_tokens += len(enc.encode(str(content)))
-                    elif stype == "PLANNER_RESPONSE" or source == "MODEL":
-                        cand_text = str(content) + str(thinking) + (json.dumps(tool_calls) if tool_calls else "")
-                        c_tok = len(enc.encode(cand_text)) if cand_text else 0
-                        p_tok = running_prompt_tokens
-                        
-                        usage_date = created_at[:10] if len(created_at) >= 10 else datetime.date.today().isoformat()
-                        
-                        all_rows.append({
-                            "timestamp": created_at,
-                            "usage_date": usage_date,
-                            "developer_user": dev_user,
-                            "conversation_id": conv_id,
-                            "step_index": step_idx,
-                            "model_name": current_model,
-                            "prompt_tokens": p_tok,
-                            "candidates_tokens": c_tok,
-                            "total_tokens": p_tok + c_tok,
-                            "client_version": "antigravity/cli/1.2.14",
-                            "project_id": os.environ.get("AI_PROJECT_ID", "desa01-uip"),
-                            "workspace_path": os.getcwd()
-                        })
-                        
-                        total_prompt_tokens += p_tok
-                        total_candidate_tokens += c_tok
-                        running_prompt_tokens += c_tok
-        except Exception as e:
-            print(f"Error en {t_path}: {e}")
-
-    print(f"\nTotal interacciones extraídas: {len(all_rows)}")
-    print(f"Tokens de Input: {total_prompt_tokens:,}")
-    print(f"Tokens de Output: {total_candidate_tokens:,}")
-    print(f"Total Tokens: {total_prompt_tokens + total_candidate_tokens:,}")
-    
-    batch_size = 250
-    inserted = 0
-    for i in range(0, len(all_rows), batch_size):
-        batch = all_rows[i:i+batch_size]
-        err = client.insert_rows_json(table_id, batch)
-        if err:
-            print(f"Error en lote {i}: {err}")
-        else:
-            inserted += len(batch)
-            print(f"Cargado lote {i // batch_size + 1}/{(len(all_rows) + batch_size - 1) // batch_size} ({inserted}/{len(all_rows)} filas)")
-            
-    print(f"\n✓ Backfill completado exitosamente: {inserted} filas insertadas en {table_id}")
-
-if __name__ == "__main__":
-    backfill()
-```
-
-### Paso 6.2: Ejecución del Backfill
 ```bash
 python .agents/scripts/backfill_token_usage.py
 ```
 
+El script escanea todos los archivos `~/.gemini/antigravity/brain/*/.system_generated/logs/transcript.jsonl`, reconstruye los cambios de modelo turno por turno, contabiliza los tokens de entrada y salida, e inserta los registros en lotes de 250 filas.
+
 ---
 
-## 7. Fase 5: Creación de Vistas Analíticas en BigQuery
+## 8. Fase 5: Vistas Analíticas y Consultas de Reporte
 
-### Paso 7.1: Vista `antigravity_developer_token_summary` (Tokens y Modelo)
-Esta vista responde exactamente a la meta de identificar cuántos tokens de input y output tiene cada desarrollador y qué modelo utilizó:
+### Ejecución Rápida de Reportes en Consola
+Puede consultar en cualquier momento el resumen de consumo ejecutando:
+```bash
+python query_reports.py
+```
 
+### Vista 1: `antigravity_developer_token_summary` (Tokens y Modelos)
 ```sql
-CREATE OR REPLACE VIEW `desa01-uip.antigravity_telemetry.antigravity_developer_token_summary` AS
+CREATE OR REPLACE VIEW `<PROYECTO_TELEMETRIA_BQ>.antigravity_telemetry.antigravity_developer_token_summary` AS
 SELECT
   usage_date,
   developer_user,
@@ -534,18 +281,16 @@ SELECT
   COUNT(1) AS total_interactions,
   COUNT(DISTINCT conversation_id) AS active_conversations
 FROM
-  `desa01-uip.antigravity_telemetry.antigravity_token_usage`
+  `<PROYECTO_TELEMETRIA_BQ>.antigravity_telemetry.antigravity_token_usage`
 GROUP BY
   usage_date,
   developer_user,
   model_name;
 ```
 
-### Paso 7.2: Vista `antigravity_user_usage_summary` (Auditoría de Invocaciones)
-Esta vista consolida las peticiones recibidas por el Cloud Audit Sink:
-
+### Vista 2: `antigravity_user_usage_summary` (Auditoría de Red / Cloud Logging)
 ```sql
-CREATE OR REPLACE VIEW `desa01-uip.antigravity_telemetry.antigravity_user_usage_summary` AS
+CREATE OR REPLACE VIEW `<PROYECTO_TELEMETRIA_BQ>.antigravity_telemetry.antigravity_user_usage_summary` AS
 SELECT
   DATE(timestamp) AS usage_date,
   protopayload_auditlog.authenticationInfo.principalEmail AS user_email,
@@ -555,20 +300,18 @@ SELECT
   MAX(timestamp) AS session_end,
   ANY_VALUE(protopayload_auditlog.requestMetadata.callerSuppliedUserAgent) AS client_version
 FROM
-  `desa01-uip.antigravity_telemetry.cloudaudit_googleapis_com_data_access`
+  `<PROYECTO_TELEMETRIA_BQ>.antigravity_telemetry.cloudaudit_googleapis_com_data_access`
 WHERE
-  protopayload_auditlog.serviceName = 'businessaicode.googleapis.com'
+  protopayload_auditlog.serviceName IN ('businessaicode.googleapis.com', 'cloudaicompanion.googleapis.com')
 GROUP BY
   usage_date,
   user_email,
   api_method;
 ```
 
----
+### Consultas Útiles para Looker Studio / BigQuery
 
-## 8. Fase 6: Consultas de Validación y Reportes
-
-### 1. Consolidado General por Desarrollador y Modelo:
+#### 1. Consolidado General por Desarrollador y Modelo
 ```sql
 SELECT
   developer_user,
@@ -578,7 +321,7 @@ SELECT
   SUM(total_tokens) AS grand_total_tokens,
   SUM(total_interactions) AS grand_interactions
 FROM
-  `desa01-uip.antigravity_telemetry.antigravity_developer_token_summary`
+  `<PROYECTO_TELEMETRIA_BQ>.antigravity_telemetry.antigravity_developer_token_summary`
 GROUP BY
   developer_user,
   model_name
@@ -586,7 +329,7 @@ ORDER BY
   grand_total_tokens DESC;
 ```
 
-### 2. Consumo Diario (Últimos 30 días):
+#### 2. Consumo Diario (Últimos 30 días)
 ```sql
 SELECT
   usage_date,
@@ -597,7 +340,7 @@ SELECT
   total_tokens,
   total_interactions
 FROM
-  `desa01-uip.antigravity_telemetry.antigravity_developer_token_summary`
+  `<PROYECTO_TELEMETRIA_BQ>.antigravity_telemetry.antigravity_developer_token_summary`
 WHERE
   usage_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
 ORDER BY
@@ -605,57 +348,22 @@ ORDER BY
   total_tokens DESC;
 ```
 
-### 3. Cruce de Auditoría (Llamadas API vs Tokens Generados):
-```sql
-WITH rpc_counts AS (
-  SELECT
-    usage_date,
-    user_email,
-    SUM(total_requests) AS api_requests
-  FROM
-    `desa01-uip.antigravity_telemetry.antigravity_user_usage_summary`
-  GROUP BY usage_date, user_email
-),
-token_counts AS (
-  SELECT
-    usage_date,
-    developer_user,
-    SUM(input_tokens) AS input_tokens,
-    SUM(output_tokens) AS output_tokens,
-    SUM(total_tokens) AS total_tokens
-  FROM
-    `desa01-uip.antigravity_telemetry.antigravity_developer_token_summary`
-  GROUP BY usage_date, developer_user
-)
-SELECT
-  COALESCE(t.usage_date, r.usage_date) AS date,
-  COALESCE(t.developer_user, r.user_email) AS developer,
-  r.api_requests,
-  t.input_tokens,
-  t.output_tokens,
-  t.total_tokens
-FROM token_counts t
-FULL OUTER JOIN rpc_counts r
-  ON t.usage_date = r.usage_date AND t.developer_user = r.user_email
-ORDER BY date DESC;
-```
-
 ---
 
 ## 9. Guía de Solución de Problemas (Troubleshooting)
 
-### A. Error BigQuery: `Views cannot be queried through prefix`
-* **Causa:** Ocurre si ejecuta consultas wildcard (`FROM dataset.*`) sobre un dataset que contiene vistas lógicas.
-* **Solución:** Consulte directamente la tabla (`FROM dataset.antigravity_token_usage`) o consulte la vista analítica (`FROM dataset.antigravity_developer_token_summary`).
+### A. La tabla `cloudaudit_googleapis_com_data_access` no aparece en BigQuery
+* **Causa:** BigQuery solo crea la tabla de forma automática cuando recibe el primer evento que coincide con el filtro del Sink, y requiere que los **Audit Logs** (`DATA_READ`, `DATA_WRITE`) estén activos en IAM para `cloudaicompanion.googleapis.com` y `businessaicode.googleapis.com`.
+* **Nota:** La tabla `antigravity_token_usage` funciona de manera 100% independiente a través del hook local (`telemetry_hook.py`), por lo que el registro de tokens y modelos no se detiene aunque el Sink aún no haya recibido eventos.
 
-### B. Error BigQuery: `404 Table ... not found on insertAll`
-* **Causa:** Al crear una tabla nueva en BigQuery mediante DDL o `bq mk`, los endpoints de streaming buffer (`insertAll`) pueden tardar entre 30 y 60 segundos en propagar los metadatos.
-* **Solución:** Aguarde un minuto tras la creación de la tabla antes de ejecutar el primer streaming insert.
+### B. Diferencia en las gráficas del panel nativo "Métricas para desarrolladores" en GCP
+* **Causa:** El panel nativo de Google Cloud agrupa métricas en lotes periódicos con corte en horario UTC y solo contabiliza el tráfico hacia el proyecto donde se envió la inferencia (`AI_PROJECT_ID`). Si el desarrollador cambia de proyecto activo o si el corte diario UTC inicia un nuevo día, el gráfico diario puede mostrarse en cero temporalmente.
 
 ### C. Error BigQuery: `UPDATE or DELETE statement would affect rows in the streaming buffer`
-* **Causa:** BigQuery no permite mutaciones DML (`UPDATE`, `DELETE`) sobre filas que aún residen en el streaming buffer en memoria (tardan entre 30 y 90 minutos en consolidarse a almacenamiento columnar).
-* **Solución:** Si necesita reiniciar datos de prueba antes de que se vacíe el buffer, elimine y recree la tabla con `bq rm -f -t` y `bq mk --table`.
+* **Causa:** BigQuery no permite sentencias `UPDATE` o `DELETE` sobre filas recién insertadas por streaming hasta que se consolidan (30 a 90 minutos).
+* **Solución:** Si necesita limpiar y recargar la tabla durante pruebas, elimine y vuelva a crear la tabla ejecutando `python deploy_infrastructure.py`.
 
 ### D. Permisos IAM de los Desarrolladores
-* **Causa:** Un desarrollador recibe error de inserción al ejecutar Antigravity.
-* **Solución:** Asegúrese de que el desarrollador o su grupo cuente con el rol `roles/bigquery.dataEditor` sobre el dataset `${WORKLOAD_PROJECT_ID}:${DATASET_NAME}` y `roles/bigquery.jobUser` sobre el proyecto `${WORKLOAD_PROJECT_ID}`.
+* **Causa:** El hook local no logra insertar filas en BigQuery.
+* **Solución:** Verifique que el usuario autenticado en `gcloud auth application-default login` cuente con el rol `roles/bigquery.dataEditor` sobre el dataset `antigravity_telemetry`.
+
